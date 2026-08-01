@@ -1,35 +1,68 @@
 # load_papers.py
-# Step 1+2 combined (fetch + parse), now using LangChain's built-in
-# ArxivLoader instead of hand-rolled requests + XML parsing.
+# Step 1+2 combined (fetch + parse).
 #
-# Why this is the "LangChain part": ArxivLoader wraps the ArXiv API call
-# AND turns each result into a LangChain Document (page_content + metadata)
-# for us -> exactly what our old fetch_arxiv.py + parse_papers.py did
-# manually, in one built-in class.
+# WHY THIS ISN'T USING ArxivLoader FOR FETCHING:
+# LangChain's ArxivLoader.load() (full-text mode) has a real bug: before
+# searching, it runs query.replace(":", "").replace("-", "") on the query
+# string. For a category-filtered query like "cat:cs.AI" this mangles it
+# into "catcs.AI", silently destroying the category filter -> 0 results,
+# no error. There's no config flag to turn this off.
+#
+# So we call the `arxiv` package directly instead -> it's the exact same
+# package ArxivLoader wraps internally, just without the buggy string
+# mangling. We still use LangChain's Document schema below, and
+# everything downstream (chunk_papers.py, save_data.py) is unchanged.
+#
+# Bonus: this also lets us sort by newest-first, which ArxivLoader never
+# exposed in the first place.
 
-from langchain_community.document_loaders import ArxivLoader
-from config import MAX_RESULTS_PER_CATEGORY
+import os
+import arxiv
+import fitz  # pymupdf, for extracting text from downloaded PDFs
+from langchain_core.documents import Document
+from config import PAPERS_PER_CATEGORY, DOC_CONTENT_CHARS_MAX
+
+# One shared client handles ArXiv's rate limiting for us automatically
+client = arxiv.Client()
+
 
 def load_papers_for_category(category: str) -> list:
     """
-    Uses LangChain's ArxivLoader to fetch + parse papers for one category.
-    Returns a list of LangChain Document objects (page_content = abstract).
+    Fetches full-text papers for one ArXiv category, downloads each PDF,
+    extracts its text with PyMuPDF, and returns a list of LangChain
+    Document objects (page_content = full paper text).
     """
-    query = f"cat:{category}"  # same ArXiv query syntax as the raw API
+    search = arxiv.Search(
+        query=f"cat:{category}",
+        max_results=PAPERS_PER_CATEGORY,
+        sort_by=arxiv.SortCriterion.SubmittedDate,  # newest papers first
+        sort_order=arxiv.SortOrder.Descending,
+    )
 
-    loader = ArxivLoader(query=query, load_max_docs=MAX_RESULTS_PER_CATEGORY)
+    docs = []
+    for result in client.results(search):
+        try:
+            pdf_path = result.download_pdf()  # downloads to a temp file
+            with fitz.open(pdf_path) as pdf:
+                text = "".join(page.get_text() for page in pdf)
+            os.remove(pdf_path)  # clean up after extracting text
+        except Exception as e:
+            # Some PDFs occasionally fail to download/parse -> skip and
+            # keep going instead of crashing the whole run.
+            print(f"  skipped one paper (download/parse failed): {e}")
+            continue
 
-    # get_summaries_as_docs() is a lightweight fetch: it grabs abstracts
-    # only (not full PDFs), matching what our original pipeline did.
-    docs = loader.get_summaries_as_docs()
-
-    # LangChain's metadata doesn't include our category or a direct PDF
-    # link, so we add those ourselves -> keeps output shape consistent
-    # with the earlier version of this pipeline.
-    for doc in docs:
-        doc.metadata["category"] = category
-        entry_id = doc.metadata.get("Entry ID", "")
-        doc.metadata["pdf_url"] = entry_id.replace("/abs/", "/pdf/")
+        docs.append(Document(
+            page_content=text[:DOC_CONTENT_CHARS_MAX],  # cap length per paper
+            metadata={
+                "Title": result.title,
+                "Authors": ", ".join(a.name for a in result.authors),
+                "Published": str(result.published.date()),
+                "category": category,
+                "entry_id": result.entry_id,
+                "pdf_url": result.pdf_url,
+            },
+        ))
 
     return docs
 
@@ -41,14 +74,8 @@ def load_all_categories(categories: list) -> list:
     """
     all_docs = []
     for category in categories:
-        print(f"Loading latest papers for category: {category} (via LangChain ArxivLoader)")
-        all_docs.extend(load_papers_for_category(category))
+        print(f"Loading full-text papers for category: {category}")
+        docs = load_papers_for_category(category)
+        print(f"  -> got {len(docs)} papers")
+        all_docs.extend(docs)
     return all_docs
-
-
-# checking that the loader works as expected
-
-result = load_papers_for_category("cs.CL")
-print(f"Loaded {len(result)} papers for category cs.CL")
-print(result[0].metadata)
-print(result[0].page_content[:200])  # print first 200 chars of abstract

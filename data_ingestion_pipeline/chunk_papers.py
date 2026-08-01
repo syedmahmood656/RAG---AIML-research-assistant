@@ -5,9 +5,8 @@
 # hard character cuts if it has to -> better chunk quality for RAG.
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from config import
+from config import CHUNK_SIZE, CHUNK_OVERLAP
 
-from config import CHUNK_OVERLAP, CHUNK_SIZE 
 
 def chunk_documents(docs: list) -> list:
     """
