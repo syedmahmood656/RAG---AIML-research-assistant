@@ -1,0 +1,9 @@
+langchain
+langchain-community
+langchain-text-splitters
+arxiv<4
+dotenv
+langchain-core
+langchain-huggingface
+config
+langchain-arxiv
