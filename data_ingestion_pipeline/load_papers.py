@@ -8,7 +8,7 @@
 # manually, in one built-in class.
 
 from langchain_community.document_loaders import ArxivLoader
-from data_ingestion_pipeline.config import MAX_RESULTS_PER_CATEGORY
+from config import MAX_RESULTS_PER_CATEGORY
 
 def load_papers_for_category(category: str) -> list:
     """
