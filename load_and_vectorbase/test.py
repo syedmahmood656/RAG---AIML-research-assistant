@@ -33,3 +33,7 @@ for i, doc in enumerate(results, 1):
     # Print the first 1000 characters of the content so it doesn't flood your terminal
     print(f"Content: {doc.page_content[:1000]}...\n") 
     print("\n" + "="*50 + "\n")
+
+
+
+    
