@@ -1,3 +1,11 @@
+.env
+__pycache__/
+venv/
 data/
 venv/
 faiss_local_index/
+docker-compose.override.yml
+docker-compose.yml
+frontend/.dockerignore
+frontend/.streamlit/config.toml        
+frontend/Dockerfile
