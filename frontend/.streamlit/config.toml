@@ -1,13 +1,14 @@
 [theme]
-base = "light"
-primaryColor = "#FF4B4B"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F2F6"
-textColor = "#262730"
+base = "dark"
+primaryColor = "#8b9bff"
+backgroundColor = "#0b1020"
+secondaryBackgroundColor = "#131a2e"
+textColor = "#e7ebf5"
 font = "sans serif"
 
 [server]
-# Same defaults the Dockerfile passes via flags, kept here so a bare
-# `streamlit run` outside Docker behaves the same.
 headless = true
 port = 8501
+
+[browser]
+gatherUsageStats = false

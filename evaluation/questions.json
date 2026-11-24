@@ -1,0 +1,16 @@
+[
+  {"question": "How can machine learning be used to trace Seiberg dualities?",
+   "any_of": ["seiberg", "dualit"]},
+  {"question": "How is a single token used to improve vision-language models for visual retrieval?",
+   "any_of": ["retoken", "visual retrieval", "vision"]},
+  {"question": "How do humanoid robots learn whole-body safety for dodgeball with control barrier functions?",
+   "any_of": ["control barrier", "cbf", "humanoid"]},
+  {"question": "What infrastructure helps synthesize chemistry literature using claims?",
+   "any_of": ["chemistry", "claim"]},
+  {"question": "How can sponge attacks increase inference energy in spiking neural networks?",
+   "any_of": ["sponge", "spiking", "snn"]},
+  {"question": "What is einx, a universal notation for tensor operations?",
+   "any_of": ["einx", "vectoriz", "notation"]},
+  {"question": "What are generalization bounds for transformer training derived from optimal control?",
+   "any_of": ["generalization bound", "optimal control", "transformer"]}
+]

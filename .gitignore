@@ -1,11 +1,21 @@
+# secrets
 .env
+
+# python
 __pycache__/
+*.pyc
 venv/
+.venv/
+
+# generated data (rebuild with the ingestion pipeline)
 data/
-venv/
-faiss_local_index/
+
+# editor / tool state
+.claude/
+.vscode/
+.idea/
+.streamlit/secrets.toml
 docker-compose.override.yml
-docker-compose.yml
-frontend/.dockerignore
-frontend/.streamlit/config.toml        
-frontend/Dockerfile
+
+# NOTE: faiss_local_index/, docker-compose.yml, Dockerfiles and
+# frontend/.streamlit/config.toml are intentionally NOT ignored - the app needs them.

@@ -1,51 +1,60 @@
-from langchain_community.document_loaders import JSONLoader
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+"""
+Build the FAISS index from data/chunked_papers.json.
 
+Run from anywhere:  python load_and_vectorbase/load.py
 
-# 1. Initialize the local embedding model
-# 'all-MiniLM-L6-v2' is widely used because it is fast, lightweight, and highly capable
-# It will download the model weights to your machine the first time you run this
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={'device': 'cpu'}, # Change to 'cuda' if you have a GPU
-    encode_kwargs={'normalize_embeddings': True}
-)
+Differences from the original script
+- Plain json instead of JSONLoader: JSONLoader needs the `jq` package (missing from
+  requirements, and hard to install on Windows) and - without a metadata_func - it DROPPED the
+  paper metadata, so the prebuilt index had no titles/authors/links.
+- Exact-duplicate chunks are removed before embedding.
+- The final message reports the real chunk count instead of a hard-coded number.
+"""
 
-# 2. Define the JSON Loader
-loader = JSONLoader(
-    file_path="./data/chunked_papers.json",
-    jq_schema='.[]',
-    content_key='page_content'
-)
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
 
-# Generator helper function to chunk the lazy loader into batches
-def batch_generator(lazy_iterable, batch_size=500):
-    batch = []
-    for item in lazy_iterable:
-        batch.append(item)
-        if len(batch) == batch_size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "backend"))
 
-# 3. Stream & Embed in Batches
+from langchain_community.vectorstores import FAISS  # noqa: E402
+from langchain_core.documents import Document  # noqa: E402
+
+from rag import get_embeddings  # noqa: E402  (same embedder the API uses)
+
+DATA_PATH = ROOT / "data" / "chunked_papers.json"
+OUT_PATH = ROOT / "faiss_local_index"
+BATCH_SIZE = 500
+
+if not DATA_PATH.exists():
+    sys.exit(f"{DATA_PATH} not found. Run first: python data_ingestion_pipeline/main.py")
+
+records = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+
+docs, seen = [], set()
+for r in records:
+    text = (r.get("page_content") or "").strip()
+    key = hashlib.md5(re.sub(r"\s+", " ", text).lower().encode("utf-8")).hexdigest()
+    if not text or key in seen:
+        continue
+    seen.add(key)
+    docs.append(Document(page_content=text, metadata=r.get("metadata", {})))
+
+print(f"{len(records)} chunks read, {len(docs)} unique after de-duplication.")
+embeddings = get_embeddings()
+
 db = None
-BATCH_SIZE = 500  # Adjust based on your system's memory capacity
-
-print("Starting batch embedding...")
-# Using loader.lazy_load() instead of loader.load()
-for i, batch in enumerate(batch_generator(loader.lazy_load(), batch_size=BATCH_SIZE)):
-    print(f"Processing batch {i + 1} ({len(batch)} chunks)...")
-    
+for start in range(0, len(docs), BATCH_SIZE):
+    batch = docs[start:start + BATCH_SIZE]
+    print(f"Embedding chunks {start + 1}-{start + len(batch)} of {len(docs)} ...")
     if db is None:
-        # Initialize FAISS with the first batch
         db = FAISS.from_documents(batch, embeddings)
     else:
-        # Incrementally add subsequent batches to the same FAISS index
         db.add_documents(batch)
 
-# 4. Save the index to disk
-db.save_local("faiss_local_index")
-print("All 35,000 chunks successfully embedded and saved!")
+db.save_local(str(OUT_PATH))
+papers = len({d.metadata.get("entry_id") for d in docs})
+print(f"Done: {len(docs)} chunks from {papers} papers saved to {OUT_PATH}")

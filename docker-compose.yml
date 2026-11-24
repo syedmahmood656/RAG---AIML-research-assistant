@@ -4,30 +4,25 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: rag-api
-    # HuggingFace's free tier inference endpoints are rate-limited and
-    # sometimes flaky; restart on failure so a transient 503 doesn't
-    # kill the user-facing experience.
     restart: unless-stopped
     environment:
-      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN:?set HUGGINGFACEHUB_API_TOKEN in .env}
+      # Token is optional: without it the API serves extractive (retrieval-only) answers.
+      HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN:-}
+      LLM_REPO_ID: ${LLM_REPO_ID:-meta-llama/Llama-3.1-8B-Instruct}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
       FAISS_INDEX_PATH: /app/faiss_local_index
       DEFAULT_K: "4"
       LLM_TEMPERATURE: "0.2"
     volumes:
-      # Mount the prebuilt index read-only so the api container can use
-      # it without re-embedding. Adjust the left side if you move the
-      # index folder.
       - ./faiss_local_index:/app/faiss_local_index:ro
     ports:
       - "7860:7860"
     healthcheck:
-      # Cheap probe: doesn't hit the LLM, doesn't hit FAISS beyond what
-      # startup already does.
       test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7860/health', timeout=2).status == 200 else 1)"]
       interval: 30s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 40s
 
   ui:
     build:
@@ -36,7 +31,6 @@ services:
     container_name: rag-ui
     restart: unless-stopped
     environment:
-      # Inside docker-compose, the api service is reachable at this DNS name.
       API_URL: http://api:7860
     depends_on:
       api:

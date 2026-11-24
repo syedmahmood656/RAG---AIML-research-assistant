@@ -1,39 +1,15 @@
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+"""Quick retrieval smoke test:  python load_and_vectorbase/test.py "your question" """
 
-# 1. Initialize the EXACT same embedding model used during creation
-print("Loading embedding model...")
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    model_kwargs={'device': 'cpu'},
-    encode_kwargs={'normalize_embeddings': True}
-)
+import sys
+from pathlib import Path
 
-# 2. Load the FAISS database from your local folder
-# Make sure the folder_path matches the folder containing your .faiss and .pkl files
-print("Loading FAISS database...")
-db = FAISS.load_local(
-    folder_path="faiss_local_index", 
-    embeddings=embeddings,
-    allow_dangerous_deserialization=True  # Required by LangChain to load the .pkl file
-)
-print("Database loaded successfully!\n")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+import rag  # noqa: E402
 
-# 3. Define your test query
-query = "What are the computational challenges of Seiberg Dualities?"
-
-# 4. Perform the similarity search
-# k=3 retrieves the top 3 most relevant chunks
-print(f"Searching for: '{query}'\n")
-results = db.similarity_search(query, k=3)
-
-# 5. Display the results and their metadata
-for i, doc in enumerate(results, 1):
-    print(f"--- Result {i} ---")
-    # Print the first 1000 characters of the content so it doesn't flood your terminal
-    print(f"Content: {doc.page_content[:1000]}...\n") 
-    print("\n" + "="*50 + "\n")
-
-
-
-    
+query = " ".join(sys.argv[1:]) or "What are the computational challenges of Seiberg Dualities?"
+print(f"Searching for: {query!r}\n")
+for i, (doc, score) in enumerate(rag.retrieve(query, k=3), 1):
+    meta = doc.metadata or {}
+    print(f"--- Result {i}  (match {rag.l2_to_similarity(score):.0%}) ---")
+    print("Title:", meta.get("Title", "(no metadata in this index)"))
+    print(doc.page_content[:600].replace("\n", " "), "...\n")

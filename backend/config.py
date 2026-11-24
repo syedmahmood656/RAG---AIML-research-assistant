@@ -1,7 +1,8 @@
 """
-Centralized config for the RAG backend.
-Reads from environment (which docker-compose or a local .env can populate).
-Fails LOUDLY on missing critical values so we never serve a half-broken backend.
+Centralised config for the RAG backend.
+
+Reads from the environment (docker-compose or a local .env populate it).
+Missing optional values degrade gracefully (e.g. no token -> extractive answers).
 """
 
 import os
@@ -10,7 +11,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the project root regardless of where uvicorn is launched from.
-# C:\Projects\RAG\.env  -> resolved from this file's location.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
@@ -36,26 +36,34 @@ def _read_float(name: str, default: float) -> float:
         return default
 
 
-# ----- paths -----
+def _clean_token(raw: str | None) -> str | None:
+    """Return a usable token, or None for empty values and copy-pasted placeholders."""
+    if not raw:
+        return None
+    token = raw.strip().strip('"').strip("'")
+    placeholders = {"", "api key", "api_key", "your_token_here", "your-token-here"}
+    if token.lower() in placeholders or token.lower().startswith("hf_xxxx"):
+        return None
+    return token
 
-# FAISS index location. Defaults to the prebuilt folder in the project root,
-# which is what `main.py` and the original pipeline use.
-_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
-FAISS_INDEX_PATH = _read("FAISS_INDEX_PATH", os.path.join(_PROJECT_ROOT_STR, "faiss_local_index"))
+
+# ----- paths -----
+FAISS_INDEX_PATH = _read("FAISS_INDEX_PATH", str(_PROJECT_ROOT / "faiss_local_index"))
 
 # ----- retrieval -----
-
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # must match the index
 DEFAULT_K = _read_int("DEFAULT_K", 4)
+# Fetch k * FETCH_MULTIPLIER candidates, then drop duplicate chunks and keep k.
+# (The prebuilt index contains duplicate chunks from papers cross-listed in cs.AI + cs.LG.)
+FETCH_MULTIPLIER = max(1, _read_int("FETCH_MULTIPLIER", 3))
 
 # ----- LLM -----
-
-# Llama 3.1 8B Instruct is gated + rate-limited on the free HF Inference API,
-# so the backend tolerates a missing token by degrading to extractive answers.
-HF_API_TOKEN = _read("HUGGINGFACEHUB_API_TOKEN")
+HF_API_TOKEN = _clean_token(_read("HUGGINGFACEHUB_API_TOKEN") or _read("HF_TOKEN"))
 LLM_REPO_ID = _read("LLM_REPO_ID", "meta-llama/Llama-3.1-8B-Instruct")
+LLM_PROVIDER = _read("LLM_PROVIDER", "auto")
 LLM_TEMPERATURE = _read_float("LLM_TEMPERATURE", 0.2)
+LLM_MAX_TOKENS = _read_int("LLM_MAX_TOKENS", 700)
 
-# Server bind config (uvicorn picks these up).
+# ----- server -----
 API_HOST = _read("API_HOST", "0.0.0.0")
 API_PORT = _read_int("API_PORT", 7860)

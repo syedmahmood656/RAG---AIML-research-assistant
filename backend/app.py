@@ -1,42 +1,52 @@
 """
 FastAPI entrypoint for the RAG backend.
 
-Endpoints:
-    GET  /health   -> liveness probe
-    POST /query    -> Server-Sent Events stream
+Endpoints
+    GET  /health  liveness probe (cheap)
+    GET  /ready   readiness probe (touches FAISS), 503 if the index is unusable
+    GET  /info    index + LLM facts for the UI
+    POST /query   Server-Sent Events stream
 
-SSE wire protocol:
-    event: sources
-    data: {"sources": [{rank, title, authors, ...}, ...]}
-
-    event: token
-    data: "<text fragment>"
-
-    event: done
-    data: {}
-
-    event: error        (only on unrecoverable failure)
-    data: {"message": "..."}
+SSE protocol - every `data:` line is JSON:
+    event: sources   data: {"sources": [{rank, title, score, snippet, ...}, ...]}
+    event: notice    data: {"message": "..."}         (optional: LLM unavailable -> fallback)
+    event: token     data: "<text fragment>"
+    event: done      data: {"elapsed_ms": 1234, "mode": "llm" | "extractive"}
+    event: error     data: {"message": "..."}          (unrecoverable failure)
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import rag
 from config import API_HOST, API_PORT, DEFAULT_K
+from sse import encode
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("rag-api")
 
-app = FastAPI(title="ArXiv RAG API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    log.info("startup: warming up FAISS index and embedder...")
+    try:
+        await asyncio.to_thread(rag.warmup)
+        log.info("startup: warmup OK")
+    except Exception as e:  # noqa: BLE001
+        log.warning("startup: warmup failed (%s) - /ready will report 503", e)
+    yield
+
+
+app = FastAPI(title="ArXiv RAG API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,15 +57,8 @@ app.add_middleware(
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="User's natural-language question.")
+    question: str = Field(..., min_length=1, max_length=2000, description="Natural-language question.")
     k: int | None = Field(None, ge=1, le=20, description="Number of chunks to retrieve.")
-
-
-def _sse(event: str, payload) -> str:
-    if not isinstance(payload, str):
-        payload = json.dumps(payload, ensure_ascii=False)
-    # SSE requires that newlines in `data` are escaped.
-    return f"event: {event}\ndata: {payload.replace(chr(10), '\\n')}\n\n"
 
 
 @app.get("/health")
@@ -64,63 +67,65 @@ def health():
 
 
 @app.get("/ready")
-def ready():
-    """Readiness probe: returns 503 if the index can't be loaded yet."""
+async def ready():
     try:
-        rag.warmup()
+        await asyncio.to_thread(rag.warmup)
         return {"status": "ready"}
     except Exception as e:  # noqa: BLE001
         log.exception("readiness failed")
         return JSONResponse({"status": "not-ready", "error": str(e)}, status_code=503)
 
 
+@app.get("/info")
+async def info():
+    try:
+        return await asyncio.to_thread(rag.info)
+    except Exception as e:  # noqa: BLE001
+        log.exception("info failed")
+        return JSONResponse({"error": str(e)}, status_code=503)
+
+
 @app.post("/query")
 async def query(req: QueryRequest):
+    question = req.question.strip()
     k = req.k or DEFAULT_K
 
     async def event_stream():
-        # 1. Sources first.
+        started = time.perf_counter()
+
+        # 1. Retrieve once; sources are sent before the first token.
         try:
-            sources = await asyncio.to_thread(rag.retrieve_sources, req.question, k)
-            yield _sse("sources", {"sources": sources})
+            results = await asyncio.to_thread(rag.retrieve, question, k)
+            yield encode("sources", {"sources": rag.format_sources(results)})
         except Exception as e:  # noqa: BLE001
             log.exception("retrieval failed")
-            yield _sse("error", {"message": f"Retrieval failed: {e}"})
+            yield encode("error", {"message": f"Retrieval failed: {e}"})
             return
 
-        # 2. Stream answer tokens.
+        # 2. Stream the answer.
+        mode = "llm"
         try:
-            async for chunk in rag.stream_answer(req.question, k):
-                yield _sse("token", chunk)
-                await asyncio.sleep(0)  # flush
+            async for kind, text in rag.stream_answer(question, results):
+                if kind == "notice":
+                    mode = "extractive"
+                    yield encode("notice", {"message": text})
+                else:
+                    yield encode("token", text)
         except Exception as e:  # noqa: BLE001
             log.exception("generation failed")
-            yield _sse("error", {"message": f"Generation failed: {e}"})
+            yield encode("error", {"message": f"Generation failed: {e}"})
             return
 
-        yield _sse("done", {})
+        yield encode("done", {"elapsed_ms": int((time.perf_counter() - started) * 1000), "mode": mode})
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-@app.on_event("startup")
-async def _startup():
-    log.info("startup: warming up FAISS index...")
-    try:
-        await asyncio.to_thread(rag.warmup)
-        log.info("startup: warmup OK")
-    except Exception as e:  # noqa: BLE001
-        log.warning("startup: warmup failed (%s) — will load lazily on first request", e)
-
-
 if __name__ == "__main__":
-    # Allows: python backend/app.py
     import uvicorn
+
     uvicorn.run("app:app", host=API_HOST, port=API_PORT, reload=False)

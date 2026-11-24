@@ -1,0 +1,3 @@
+# Frontend (UI) dependencies - used by frontend/Dockerfile.
+streamlit==1.39.0
+requests==2.32.3

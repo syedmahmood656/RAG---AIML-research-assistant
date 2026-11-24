@@ -1,81 +1,77 @@
 # load_papers.py
-# Step 1+2 combined (fetch + parse).
+# Fetch + parse papers from arXiv.
 #
-# WHY THIS ISN'T USING ArxivLoader FOR FETCHING:
-# LangChain's ArxivLoader.load() (full-text mode) has a real bug: before
-# searching, it runs query.replace(":", "").replace("-", "") on the query
-# string. For a category-filtered query like "cat:cs.AI" this mangles it
-# into "catcs.AI", silently destroying the category filter -> 0 results,
-# no error. There's no config flag to turn this off.
-#
-# So we call the `arxiv` package directly instead -> it's the exact same
-# package ArxivLoader wraps internally, just without the buggy string
-# mangling. We still use LangChain's Document schema below, and
-# everything downstream (chunk_papers.py, save_data.py) is unchanged.
-#
-# Bonus: this also lets us sort by newest-first, which ArxivLoader never
-# exposed in the first place.
+# WHY THIS DOESN'T USE LangChain's ArxivLoader: its full-text mode runs
+# query.replace(":", "") before searching, which turns "cat:cs.AI" into "catcs.AI" and silently
+# destroys the category filter (0 results, no error). We call the `arxiv` package directly -
+# the same package ArxivLoader wraps - and still return LangChain Documents.
 
-import os
+import tempfile
+
 import arxiv
 import fitz  # pymupdf, for extracting text from downloaded PDFs
 from langchain_core.documents import Document
-from config import PAPERS_PER_CATEGORY, DOC_CONTENT_CHARS_MAX
 
-# One shared client handles ArXiv's rate limiting for us automatically
-client = arxiv.Client()
+from config import DOC_CONTENT_CHARS_MAX, PAPERS_PER_CATEGORY
+
+# One shared client handles arXiv's rate limiting (3 s between requests) and retries.
+client = arxiv.Client(page_size=50, delay_seconds=3.0, num_retries=5)
 
 
-def load_papers_for_category(category: str) -> list:
+def load_papers_for_category(category: str, seen_ids: set) -> list:
     """
-    Fetches full-text papers for one ArXiv category, downloads each PDF,
-    extracts its text with PyMuPDF, and returns a list of LangChain
-    Document objects (page_content = full paper text).
+    Fetch the newest papers of one category, download each PDF, extract its text and return
+    LangChain Documents. Papers whose entry_id is already in `seen_ids` (cross-listed in an
+    earlier category) are skipped, so the corpus never contains the same paper twice.
     """
     search = arxiv.Search(
         query=f"cat:{category}",
         max_results=PAPERS_PER_CATEGORY,
-        sort_by=arxiv.SortCriterion.SubmittedDate,  # newest papers first
+        sort_by=arxiv.SortCriterion.SubmittedDate,
         sort_order=arxiv.SortOrder.Descending,
     )
 
     docs = []
     for result in client.results(search):
+        if result.entry_id in seen_ids:
+            continue
         try:
-            pdf_path = result.download_pdf()  # downloads to a temp file
-            with fitz.open(pdf_path) as pdf:
-                text = "".join(page.get_text() for page in pdf)
-            os.remove(pdf_path)  # clean up after extracting text
-        except Exception as e:
-            # Some PDFs occasionally fail to download/parse -> skip and
-            # keep going instead of crashing the whole run.
+            with tempfile.TemporaryDirectory() as tmp:
+                pdf_path = result.download_pdf(dirpath=tmp)
+                with fitz.open(pdf_path) as pdf:
+                    text = "".join(page.get_text() for page in pdf)
+        except Exception as e:  # noqa: BLE001
             print(f"  skipped one paper (download/parse failed): {e}")
             continue
 
-        docs.append(Document(
-            page_content=text[:DOC_CONTENT_CHARS_MAX],  # cap length per paper
-            metadata={
-                "Title": result.title,
-                "Authors": ", ".join(a.name for a in result.authors),
-                "Published": str(result.published.date()),
-                "category": category,
-                "entry_id": result.entry_id,
-                "pdf_url": result.pdf_url,
-            },
-        ))
+        text = text.strip()
+        if not text:  # scanned / image-only PDF
+            print(f"  skipped '{result.title[:50]}' (no extractable text)")
+            continue
 
+        seen_ids.add(result.entry_id)
+        docs.append(
+            Document(
+                page_content=text[:DOC_CONTENT_CHARS_MAX],
+                metadata={
+                    "Title": result.title,
+                    "Authors": ", ".join(a.name for a in result.authors),
+                    "Published": str(result.published.date()),
+                    "category": category,
+                    "entry_id": result.entry_id,
+                    "pdf_url": result.pdf_url,
+                },
+            )
+        )
     return docs
 
 
 def load_all_categories(categories: list) -> list:
-    """
-    Loops over every category we care about and returns one combined,
-    flat list of LangChain Document objects across all categories.
-    """
-    all_docs = []
+    """Loop over every category and return one flat, de-duplicated list of Documents."""
+    all_docs, seen_ids = [], set()
     for category in categories:
         print(f"Loading full-text papers for category: {category}")
-        docs = load_papers_for_category(category)
-        print(f"  -> got {len(docs)} papers")
+        docs = load_papers_for_category(category, seen_ids)
+        print(f"  -> got {len(docs)} new papers")
         all_docs.extend(docs)
     return all_docs
