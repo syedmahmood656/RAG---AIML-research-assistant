@@ -57,10 +57,11 @@ DEFAULT_K = _read_int("DEFAULT_K", 4)
 # (The prebuilt index contains duplicate chunks from papers cross-listed in cs.AI + cs.LG.)
 FETCH_MULTIPLIER = max(1, _read_int("FETCH_MULTIPLIER", 3))
 
-# ----- LLM -----
-HF_API_TOKEN = _clean_token(_read("HUGGINGFACEHUB_API_TOKEN") or _read("HF_TOKEN"))
-LLM_REPO_ID = _read("LLM_REPO_ID", "meta-llama/Llama-3.1-8B-Instruct")
-LLM_PROVIDER = _read("LLM_PROVIDER", "auto")
+# ----- LLM (OpenRouter, OpenAI-compatible) -----
+HF_API_TOKEN = _clean_token(_read("OPENROUTER_API_KEY"))  # name kept so rag.py needs no other edits
+LLM_BASE_URL = _read("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_REPO_ID = _read("LLM_REPO_ID", "qwen/qwen3-next-80b-a3b-instruct:free")
+LLM_PROVIDER = "openrouter"
 LLM_TEMPERATURE = _read_float("LLM_TEMPERATURE", 0.2)
 LLM_MAX_TOKENS = _read_int("LLM_MAX_TOKENS", 700)
 

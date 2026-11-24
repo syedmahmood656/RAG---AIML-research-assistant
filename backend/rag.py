@@ -100,22 +100,94 @@ def _load_db():
     return _DB
 
 
+class _OpenRouterClient:
+    """OpenRouter adapter: walks through free models until one actually answers."""
+
+    BAD = ("reasoning", "thinking", "preview", "-vl", "omni", "1.7b", "embed")
+    MAX_ROUNDS = 3     # full passes over the model list
+    ROUND_WAIT = 10    # seconds to wait between passes
+    MAX_MODELS = 10    # models tried per pass
+
+    def __init__(self, api_key: str, base_url: str, model: str):
+        from openai import OpenAI
+
+        self._c = OpenAI(api_key=api_key, base_url=base_url, timeout=60, max_retries=0)
+        self._preferred = model
+        self._models = None
+
+    def _candidates(self):
+        if self._models is None:
+            import os
+
+            names = [self._preferred]
+            names += [m.strip() for m in os.environ.get("LLM_FALLBACK_MODELS", "").split(",") if m.strip()]
+            try:
+                for m in self._c.models.list().data:
+                    mid = m.id
+                    if mid.endswith(":free") and not any(b in mid.lower() for b in self.BAD):
+                        names.append(mid)
+            except Exception as e:  # noqa: BLE001
+                print(f"[rag] could not list free models: {e}", flush=True)
+            seen, ordered = set(), []
+            for n in names:
+                if n not in seen:
+                    seen.add(n)
+                    ordered.append(n)
+            self._models = ordered[: self.MAX_MODELS]
+            print(f"[rag] LLM candidates: {self._models}", flush=True)
+        return self._models
+
+    def chat_completion(self, messages, max_tokens, temperature, stream):
+        import itertools
+        import time
+
+        last = None
+        for rnd in range(self.MAX_ROUNDS):
+            for model in self._candidates():
+                try:
+                    it = iter(
+                        self._c.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            stream=True,
+                        )
+                    )
+                    buffered, got = [], False
+                    for chunk in it:  # wait for the first real text
+                        buffered.append(chunk)
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            got = True
+                            break
+                    if not got:
+                        raise RuntimeError("empty response")
+                    print(f"[rag] answering with {model}", flush=True)
+                    return itertools.chain(buffered, it)
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    if getattr(e, "status_code", None) in (401, 403):
+                        raise  # bad key: other models will not help
+                    print(f"[rag] {model} failed ({type(e).__name__}); trying next", flush=True)
+            if rnd < self.MAX_ROUNDS - 1:
+                print(f"[rag] all models busy, waiting {self.ROUND_WAIT}s...", flush=True)
+                time.sleep(self.ROUND_WAIT)
+        raise last or RuntimeError("no model available")
+
 def _get_client():
-    """Return a HuggingFace InferenceClient, or None (-> extractive fallback)."""
+    """Return an OpenRouter client, or None (-> excerpts-only fallback)."""
     global _CLIENT, _LLM_ERROR
     if _CLIENT is not None or _LLM_ERROR is not None:
         return _CLIENT
     if not HF_API_TOKEN:
-        _LLM_ERROR = "No Hugging Face token configured - showing retrieved excerpts only."
+        _LLM_ERROR = "No OpenRouter API key configured - showing retrieved excerpts only."
         print(f"[rag] LLM disabled: {_LLM_ERROR}", flush=True)
         return None
     try:
-        from huggingface_hub import InferenceClient
+        from config import LLM_BASE_URL
 
-        _CLIENT = InferenceClient(
-            model=LLM_REPO_ID, token=HF_API_TOKEN, provider=LLM_PROVIDER, timeout=120
-        )
-        print(f"[rag] LLM client ready: {LLM_REPO_ID} (provider={LLM_PROVIDER})", flush=True)
+        _CLIENT = _OpenRouterClient(HF_API_TOKEN, LLM_BASE_URL, LLM_REPO_ID)
+        print(f"[rag] LLM client ready: {LLM_REPO_ID} via {LLM_BASE_URL}", flush=True)
     except Exception as e:  # noqa: BLE001
         _LLM_ERROR = f"LLM client init failed ({type(e).__name__}: {e})"
         print(f"[rag] {_LLM_ERROR}", flush=True)
